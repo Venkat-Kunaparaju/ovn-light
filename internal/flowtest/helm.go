@@ -168,6 +168,43 @@ func (m *Manager) startHelm(ctx context.Context, id string, q Request) (*batch.J
 var chartSummary = regexp.MustCompile(`Test ID: \([0-9]+\) ([A-Z0-9_]+), Test Type: (IPERF_TCP|HTTP), (.*)`)
 var chartBitrate = regexp.MustCompile(`TX Bitrate: ([0-9.eE+\-]+) Gbps, RX Bitrate: ([0-9.eE+\-]+) Gbps`)
 var chartOffload = regexp.MustCompile(`plugin (validate_offload)(?: \(([^)]+)\))?, (succeeded|failed)(?:: ([^\r\n]*))?`)
+var chartPackets = regexp.MustCompile(`ethtool statistics for pod (\S+) on node (\S+):\r?\nrx_packet_start: ([0-9]+|N/A)\r?\ntx_packet_start: ([0-9]+|N/A)\r?\nrx_packet_end: ([0-9]+|N/A)\r?\ntx_packet_end: ([0-9]+|N/A)`)
+
+func packetCounter(start, end string) *PacketCounter {
+	first, err := strconv.ParseUint(start, 10, 64)
+	if err != nil {
+		return nil
+	}
+	last, err := strconv.ParseUint(end, 10, 64)
+	if err != nil {
+		return nil
+	}
+	counter := &PacketCounter{Start: first, End: last}
+	if last >= first {
+		packets := last - first
+		counter.Packets = &packets
+	}
+	return counter
+}
+
+func (r *Run) readOffloadPackets(raw string) {
+	if r.Traffic == nil {
+		return
+	}
+	for _, match := range chartPackets.FindAllStringSubmatch(raw, -1) {
+		role := r.nativeRole(match[1])
+		if role == "" || role == "client" && match[2] != r.Source.Node || role == "server" && match[2] != r.Destination.Node {
+			continue
+		}
+		for i := range r.Traffic.Offload {
+			result := &r.Traffic.Offload[i]
+			if result.Plugin == "validate_offload" && strings.EqualFold(result.Role, role) {
+				result.RX = packetCounter(match[3], match[5])
+				result.TX = packetCounter(match[4], match[6])
+			}
+		}
+	}
+}
 
 func (m *Manager) helmResult(ctx context.Context, pod *core.Pod, job *batch.Job) (Traffic, error) {
 	result := Traffic{Test: job.Annotations["ovn-light.io/test"], Case: job.Annotations["ovn-light.io/case"]}
@@ -193,6 +230,9 @@ func (m *Manager) helmResult(ctx context.Context, pod *core.Pod, job *batch.Job)
 			result.Offload = append(result.Offload, verdict)
 		}
 	}
+	run := runFromJob(job)
+	run.Traffic = &result
+	run.readOffloadPackets(string(raw))
 	wantType := "IPERF_TCP"
 	if result.Test == "http" {
 		wantType = "HTTP"

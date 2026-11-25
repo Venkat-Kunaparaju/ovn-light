@@ -110,9 +110,11 @@ function testResult(run, root=$('traffic-test-result')) {
     root.append(text('h3','TFT hardware offload validation'));
     for(const result of traffic.offload){
       root.append(badge((result.role?result.role+' · ':'')+(result.passed?'Passed':'Failed'),result.passed?'green':'red'));
+      root.append(text('p',[['RX',result.rx],['TX',result.tx]].map(([direction,counter])=>
+        direction+': '+(counter?.packets!=null?counter.packets.toLocaleString()+' packets':counter?'unavailable (counter reset)':'unavailable')).join(' · ')));
       if(result.reason)root.append(text('p',result.reason));
     }
-    root.append(text('p','The TFT runner log contains the representor counters before and after traffic.','note'));
+    root.append(text('p','Packet counts are representor counter increases during the test. Before and after values are in the TFT runner log.','note'));
   }
   if(traffic?.log){
     const log=text('details','');

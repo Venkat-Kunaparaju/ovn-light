@@ -49,10 +49,18 @@ type Traffic struct {
 }
 
 type OffloadValidation struct {
-	Plugin string `json:"plugin"`
-	Role   string `json:"role,omitempty"`
-	Passed bool   `json:"passed"`
-	Reason string `json:"reason,omitempty"`
+	Plugin string         `json:"plugin"`
+	Role   string         `json:"role,omitempty"`
+	Passed bool           `json:"passed"`
+	Reason string         `json:"reason,omitempty"`
+	RX     *PacketCounter `json:"rx,omitempty"`
+	TX     *PacketCounter `json:"tx,omitempty"`
+}
+
+type PacketCounter struct {
+	Start   uint64  `json:"start"`
+	End     uint64  `json:"end"`
+	Packets *uint64 `json:"packets,omitempty"`
 }
 
 func (t Traffic) offloadFailed() bool {

@@ -92,6 +92,9 @@ func New(client kubernetes.Interface, image, device, rdma, dir string) (*Manager
 		scenario, _ := lookupCase(run.Case)
 		run.Test, run.Case = profile.ID, scenario.ID
 		run.TestName, run.CaseName = profile.Name, scenario.Name
+		if run.Traffic != nil {
+			run.readOffloadPackets(run.Traffic.Log)
+		}
 	}
 	return m, nil
 }

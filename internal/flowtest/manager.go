@@ -274,24 +274,31 @@ func (m *Manager) Start(ctx context.Context, q Request) (Status, error) {
 	if !ok || testCase.Service && !profile.Service {
 		return Status{}, fmt.Errorf("unsupported test case for %s", profile.Name)
 	}
-	iperf := profile.ID == defaultTest || profile.ID == "iperf-udp"
-	if q.MinimumGbps != nil {
-		value := *q.MinimumGbps
-		if !(iperf || profile.RDMA || profile.ID == "netperf-tcp-stream") || value <= 0 || math.IsNaN(value) || math.IsInf(value, 0) {
-			return Status{}, fmt.Errorf("choose a bandwidth test and a positive, finite minimum in Gbit/s")
+	if m.helmNamespace != "" {
+		if profile.ID != defaultTest {
+			return Status{}, fmt.Errorf("only TCP throughput tests are supported")
 		}
-	}
-	if q.SenderMbps < 0 || q.SenderMbps > 1000000 || q.SenderMbps != 0 && (!iperf || q.MinimumGbps == nil) {
-		return Status{}, fmt.Errorf("choose an iperf throughput check to set a sender rate of 1–1000000 Mbit/s")
-	}
-	if m.helmNamespace != "" && q.SenderMbps != 0 {
-		return Status{}, fmt.Errorf("the TFT chart generator does not support setting a sender rate")
-	}
-	if m.helmNamespace != "" && profile.ID != defaultTest && profile.ID != "http" {
-		return Status{}, fmt.Errorf("the TFT chart generator supports iperf3 TCP and HTTP")
-	}
-	if iperf && q.SenderMbps == 0 && m.helmNamespace == "" {
-		q.SenderMbps = 1
+		if q.MinimumGbps != nil && *q.MinimumGbps != 0 {
+			return Status{}, fmt.Errorf("minimum throughput is fixed at 0 Gbit/s")
+		}
+		if q.SenderMbps != 0 {
+			return Status{}, fmt.Errorf("TCP throughput uses the available bandwidth")
+		}
+		q.TestSettings = TestSettings{}
+	} else {
+		iperf := profile.ID == defaultTest || profile.ID == "iperf-udp"
+		if q.MinimumGbps != nil {
+			value := *q.MinimumGbps
+			if !(iperf || profile.RDMA || profile.ID == "netperf-tcp-stream") || value <= 0 || math.IsNaN(value) || math.IsInf(value, 0) {
+				return Status{}, fmt.Errorf("choose a bandwidth test and a positive, finite minimum in Gbit/s")
+			}
+		}
+		if q.SenderMbps < 0 || q.SenderMbps > 1000000 || q.SenderMbps != 0 && (!iperf || q.MinimumGbps == nil) {
+			return Status{}, fmt.Errorf("choose an iperf throughput check to set a sender rate of 1–1000000 Mbit/s")
+		}
+		if iperf && q.SenderMbps == 0 {
+			q.SenderMbps = 1
+		}
 	}
 	if q.Network != "default" {
 		return Status{}, fmt.Errorf("choose the default network")

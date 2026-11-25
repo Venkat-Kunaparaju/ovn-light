@@ -31,6 +31,8 @@ type Evaluation struct {
 	Reason      string   `json:"reason,omitempty"`
 }
 type Traffic struct {
+	TXGbps        *float64            `json:"txGbps,omitempty"`
+	RXGbps        *float64            `json:"rxGbps,omitempty"`
 	Offload       []OffloadValidation `json:"offload,omitempty"`
 	Evaluation    *Evaluation         `json:"evaluation,omitempty"`
 	Test          string              `json:"test,omitempty"`

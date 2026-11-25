@@ -87,14 +87,9 @@
 <dialog id="detail"><div class="dialog-header"><p class="eyebrow">DROP EVIDENCE</p><button class="icon close" aria-label="Close">×</button></div><div id="detail-body"></div></dialog>
 <dialog id="traffic-test-dialog" aria-labelledby="traffic-test-title">
 <div class="dialog-header"><h2 id="traffic-test-title">Run traffic flow test</h2><button class="icon close" aria-label="Close">×</button></div>
-<p>Run one upstream test between temporary pods on the default network.</p>
+<p>Run a TCP throughput and hardware offload test between temporary pods on the default network.</p>
 <form id="traffic-test-form"><div class="traffic-test-nodes">
-<label>Test type<select required id="traffic-test-profile"></select></label>
 <label>Test case<select required id="traffic-test-case"></select></label></div>
-<div class="traffic-test-nodes">
-<label id="test-mode-label">Purpose<select id="test-mode"><option value="connectivity">Connectivity check</option><option value="throughput">Throughput check</option></select></label>
-<label id="test-min-label" hidden>Minimum throughput (Gbit/s)<input type="number" id="test-min" step="any" placeholder="e.g. 0.0008 or 15" disabled required></label>
-<label id="test-rate-label" hidden>Sender rate (Mbit/s)<input type="number" id="test-rate" min="1" max="1000000" step="1" value="1" disabled required></label></div>
 <p id="traffic-test-description" class="note"></p><div class="traffic-test-nodes"><label>Source node<select required id="traffic-test-source"></select></label><label>Destination node<select required id="traffic-test-destination"></select></label></div>
 <p id="traffic-test-message" class="note" role="status"></p><button id="traffic-test-submit" class="button primary" type="submit" disabled>Start test</button></form>
 <div id="traffic-test-result"></div></dialog>

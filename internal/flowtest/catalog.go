@@ -104,9 +104,8 @@ func (m *Manager) Options(ctx context.Context) (Options, error) {
 	}
 	if m.helmNamespace != "" {
 		o.Runner = "helm"
-		o.Profiles = []Profile{profiles[0], profiles[2]}
+		o.Profiles = []Profile{profiles[0]}
 		o.Profiles[0].Description = "Run TCP iperf for 120 seconds using the installed TFT chart."
-		o.Profiles[1].Description = "Verify an HTTP response using the installed TFT chart."
 	}
 	o.Device, o.RDMAResource = m.device, m.rdma
 	nodes, err := m.client.CoreV1().Nodes().List(ctx, meta.ListOptions{})

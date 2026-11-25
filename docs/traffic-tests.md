@@ -1,25 +1,29 @@
 # Run a traffic flow test
 
-Open **Hardware Offload → Run traffic test**, or open a traffic link in **Topology** and choose **Run traffic test**. Pick a test type, test case and source node. For a cross-node case, also pick the destination node. A topology link preselects its nodes. You can change either endpoint before clicking **Start test**. Follow running and completed tests in **Traffic test history** on Hardware Offload. The Issues page also shows the three most recent runs. Select a run to open its saved measurements and per-node evidence.
+Open **Hardware Offload → Run traffic test**, or open a traffic link in **Topology** and choose **Run traffic test**. Pick a test case and source node. For a cross-node case, also pick the destination node. A topology link preselects its nodes. You can change either endpoint before clicking **Start test**. Follow running and completed tests in **Traffic test history** on Hardware Offload. The Issues page also shows the three most recent runs. Select a run to open its saved measurements and per-node evidence.
 
 The test pods run on the cluster default network in a unique
 `ovn-light-tests-<run-id>` namespace. For a ClusterIP case, TFT also creates a
 temporary Service. Policies selecting application pods can differ from those
 selecting these test pods.
 
-The picker offers TCP iperf and HTTP, using same-node or different-node placement
-and either pod IP or ClusterIP paths. TCP iperf runs for 120 seconds at the
-available bandwidth. A **Connectivity check** has no minimum throughput. For a
-**Throughput check**, enter a minimum in Gbit/s; TFT evaluates the measurement
-against that threshold. HTTP verifies a response. Only one test runs at a time.
+The picker runs TCP iperf with kernel hardware-offload validation, using
+same-node or different-node placement and either pod IP or ClusterIP paths.
+Each run measures the available TCP bitrate for 120 seconds and reports TX and
+RX in Gbit/s. `TFT_PERF_MIN_TPUT` is fixed at `0`; there is no connectivity mode,
+HTTP test or user-entered throughput threshold.
+
+Only one test runs at a time. The iperf endpoints have separate pod IPs and use
+neither host networking nor host ports. TFT's runner and tools use host
+networking but do not bind the iperf server port.
 
 ## Use the TFT Helm chart
 
 OVN-Light uses the traffic flow tests Helm chart.
 Install that chart using its deployment instructions, values and registry
 credentials. Keep its `ovn-sdn-flow-tests` CronJob suspended. Use a dedicated
-chart installation for OVN-Light so it does not share the one-shot user
-ConfigMap with another test launcher. No TFT source or image changes are needed.
+chart installation for OVN-Light so its runner does not share configuration
+with another test launcher. No TFT source or image changes are needed.
 
 The flow-test namespace defaults to `ovn-k8s-flow-tests`. Set
 `OVN_LIGHT_TRAFFIC_TEST_NAMESPACE` only when the chart is installed in another
@@ -45,23 +49,23 @@ Each UI request creates `ovn-sdn-ft-config-user` in the chart's namespace:
 | Test case | `TFT_TEST_CASES` |
 | Source node | `TFT_REQ_REMOTE_CLIENT_NODE` |
 | Destination node | `TFT_REQ_SERVER_NODE` |
-| TCP iperf or HTTP | `TFT_IPERF` and `TFT_CURL` |
-| Test duration | `TFT_IPERF_TIME` or `TFT_CURL_TIME`, from the selected profile |
-| Minimum throughput | `TFT_PERF_MIN_TPUT`; zero for a connectivity check |
+| TCP throughput | `TFT_IPERF=true`, `TFT_CURL=false` |
+| Test duration | `TFT_IPERF_TIME=120` |
+| Minimum throughput | `TFT_PERF_MIN_TPUT=0` |
 
 TCP runs also set `TFT_PLUGINS=validate_offload`. TFT's existing plugin
 finds each endpoint's VF representor and samples kernel ethtool RX and TX
 packet counters before and after traffic. OVN-Light shows its native client/server
-verdicts separately from traffic delivery and throughput. The TFT runner log
-contains the sampled counters and failure details; TFT owns the validation
+verdicts and RX/TX packet-counter increases alongside throughput. The TFT runner
+log contains the sampled counters and failure details; TFT owns the validation
 thresholds and logic.
 
 OVN-Light then creates a Job from the installed CronJob's `jobTemplate`, keeping
 its image, entrypoint, service account, pull secrets and resource configuration.
 The Job imports `ovn-sdn-ft-config` first and `ovn-sdn-ft-config-user` second.
-TFT reads those environment values, deletes the user ConfigMap, generates its
+TFT reads the environment values, deletes the user ConfigMap, generates its
 configuration and runs `tft.py --check`. OVN-Light recreates the user ConfigMap
-for the next request; it refuses to overwrite one that already exists. The
+for the next request and refuses to overwrite one that already exists. The
 chart's `TFT_SKIP_TESTS` is preserved, and selecting a skipped case is rejected.
 
 Runs disable additional target-access subtests and deferred cleanup. TFT creates
@@ -85,7 +89,8 @@ Software-only KIND nodes cannot demonstrate hardware offload.
 
 Expand a matched path for individual recirculation IDs, stage states, provider reasons and partial-packet counter deltas. DOCA entries show the zone, observed direction, original and reply offload flags, and any deferred-reply reason supplied by the provider. Deltas may cover shared stages. A persistent issue requires the collector’s usual activity and grace checks. A successful transfer can still contain software stages. If the collector identifies a matching denying ACL, its details accompany the traffic result. [Hardware offload evidence](offload.md)
 
-One fixed Kubernetes Job serializes runs. OVN-Light saves the latest 30 runs in
-its data directory and deletes each completed Job after collecting its result.
-The chart's TTL also covers interrupted Job cleanup. Evidence is collected while
-the server is running; a server interruption can leave gaps.
+The fixed `cross-node-tcp` Job name serializes runs, including across server
+restarts. OVN-Light saves the latest 30 runs in its data directory and deletes
+each completed Job after collecting its result. TFT cleans up its endpoint
+namespace. The chart's Job TTL also covers interrupted Job cleanup. Evidence is
+collected while the server is running; a server interruption can leave gaps.

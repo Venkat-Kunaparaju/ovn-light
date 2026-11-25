@@ -86,30 +86,21 @@ func (m *Manager) startHelm(ctx context.Context, id string, q Request) (*batch.J
 		"TFT_REQ_REMOTE_CLIENT_NODE":        q.SourceNode,
 		"TFT_REQ_SERVER_NODE":               q.DestinationNode,
 		"TFT_NAMESPACE":                     testNS,
-		"TFT_IPERF":                         strconv.FormatBool(profile.ID == defaultTest),
-		"TFT_CURL":                          strconv.FormatBool(profile.ID == "http"),
+		"TFT_IPERF":                         "true",
+		"TFT_CURL":                          "false",
 		"TFT_IPERF_TIME":                    strconv.Itoa(profile.Seconds),
-		"TFT_CURL_TIME":                     strconv.Itoa(profile.Seconds),
 		"TFT_PERF_MIN_TPUT":                 "0",
 		"TFT_ENABLE_TARGET_ACCESS_SUBTESTS": "false",
 		"TFT_JOB_DEFER_CLEANUP":             "false",
 	}
-	if q.MinimumGbps != nil {
-		data["TFT_PERF_MIN_TPUT"] = strconv.FormatFloat(*q.MinimumGbps, 'g', -1, 64)
-	}
-	if profile.ID == defaultTest {
-		data["TFT_PLUGINS"] = "validate_offload"
-	}
+	data["TFT_PLUGINS"] = "validate_offload"
 	j := &batch.Job{
 		ObjectMeta: meta.ObjectMeta{Name: jobName, Namespace: ns, Labels: map[string]string{runLabel: id, "app.kubernetes.io/managed-by": "ovn-light"}},
 		Spec:       *cron.Spec.JobTemplate.Spec.DeepCopy(),
 	}
-	portKey, port := "TFT_IPERF_POD_PORT", "5201"
-	if profile.ID == "http" {
-		portKey, port = "TFT_HTTP_POD_PORT", "8080"
-	}
-	if base.Data[portKey] != "" {
-		port = base.Data[portKey]
+	port := base.Data["TFT_IPERF_POD_PORT"]
+	if port == "" {
+		port = "5201"
 	}
 	settings, err := json.Marshal(q.TestSettings)
 	if err != nil {
@@ -165,7 +156,7 @@ func (m *Manager) startHelm(ctx context.Context, id string, q Request) (*batch.J
 	return created, err
 }
 
-var chartSummary = regexp.MustCompile(`Test ID: \([0-9]+\) ([A-Z0-9_]+), Test Type: (IPERF_TCP|HTTP), (.*)`)
+var chartSummary = regexp.MustCompile(`Test ID: \([0-9]+\) ([A-Z0-9_]+), Test Type: (IPERF_TCP), (.*)`)
 var chartBitrate = regexp.MustCompile(`TX Bitrate: ([0-9.eE+\-]+) Gbps, RX Bitrate: ([0-9.eE+\-]+) Gbps`)
 var chartOffload = regexp.MustCompile(`plugin (validate_offload)(?: \(([^)]+)\))?, (succeeded|failed)(?:: ([^\r\n]*))?`)
 var chartPackets = regexp.MustCompile(`ethtool statistics for pod (\S+) on node (\S+):\r?\nrx_packet_start: ([0-9]+|N/A)\r?\ntx_packet_start: ([0-9]+|N/A)\r?\nrx_packet_end: ([0-9]+|N/A)\r?\ntx_packet_end: ([0-9]+|N/A)`)
@@ -233,16 +224,8 @@ func (m *Manager) helmResult(ctx context.Context, pod *core.Pod, job *batch.Job)
 	run := runFromJob(job)
 	run.Traffic = &result
 	run.readOffloadPackets(string(raw))
-	wantType := "IPERF_TCP"
-	if result.Test == "http" {
-		wantType = "HTTP"
-	}
 	for _, match := range chartSummary.FindAllStringSubmatch(string(raw), -1) {
-		if match[1] != result.Case || match[2] != wantType {
-			continue
-		}
-		if wantType == "HTTP" {
-			result.Delivered = strings.HasSuffix(strings.TrimSpace(match[3]), "succeeded")
+		if match[1] != result.Case || match[2] != "IPERF_TCP" {
 			continue
 		}
 		rates := chartBitrate.FindStringSubmatch(match[3])
@@ -252,13 +235,7 @@ func (m *Manager) helmResult(ctx context.Context, pod *core.Pod, job *batch.Job)
 		tx, _ := strconv.ParseFloat(rates[1], 64)
 		rx, _ := strconv.ParseFloat(rates[2], 64)
 		result.Delivered, result.BPS = tx > 0 && rx > 0, rx*1e9
-		var settings TestSettings
-		if err := json.Unmarshal([]byte(job.Annotations["ovn-light.io/settings"]), &settings); err != nil {
-			return result, err
-		}
-		if settings.MinimumGbps != nil {
-			result.Evaluation = &Evaluation{MinimumGbps: *settings.MinimumGbps, TXGbps: &tx, RXGbps: &rx, Passed: strings.HasSuffix(strings.TrimSpace(match[3]), "succeeded")}
-		}
+		result.TXGbps, result.RXGbps = &tx, &rx
 	}
 	if !result.Delivered {
 		result.Error = "TFT did not report a successful transfer for the selected test and case. See the TFT runner log."

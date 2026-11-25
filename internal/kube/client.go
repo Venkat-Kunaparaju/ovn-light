@@ -132,6 +132,11 @@ func (c *Client) Exec(ctx context.Context, t Target, args []string, stdin io.Rea
 }
 
 func (c *Client) execBounded(ctx context.Context, t Target, args []string, stdin io.Reader, limit int) (string, error) {
+	if len(args) >= 3 && args[0] == "ovs-appctl" && args[1] == "-t" && args[2] == "ovs-vswitchd" {
+		args = append([]string{"sh", "-c", `pid=$(cat /var/run/openvswitch/ovs-vswitchd.pid) || exit
+case "$pid" in ''|*[!0-9]*) exit 1;; esac
+exec ovs-appctl -t "/var/run/openvswitch/ovs-vswitchd.$pid.ctl" "$@"`, "ovs-appctl"}, args[3:]...)
+	}
 	req := c.Core.CoreV1().RESTClient().Post().Resource("pods").Name(t.Pod).Namespace(t.Namespace).SubResource("exec").VersionedParams(&core.PodExecOptions{Container: t.Container, Command: args, Stdin: stdin != nil, Stdout: true, Stderr: true}, scheme.ParameterCodec)
 	config := rest.CopyConfig(c.Config)
 	config.Timeout = 0

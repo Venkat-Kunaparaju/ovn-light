@@ -462,7 +462,7 @@ func (m *Manager) reconcile(ctx context.Context) error {
 				if err != nil {
 					return err
 				}
-				if !complete && (result.Evaluation == nil || result.Evaluation.Passed) {
+				if !complete && !result.offloadFailed() && (result.Evaluation == nil || result.Evaluation.Passed) {
 					result.Delivered = false
 					result.Error = strings.TrimSpace("TFT Job failed. " + reason + " " + result.Error)
 				}
@@ -491,6 +491,9 @@ func (m *Manager) reconcile(ctx context.Context) error {
 		m.run.Finished = &now
 		m.run.Traffic = &result
 		m.run.Phase = "completed"
+		if result.offloadFailed() {
+			m.run.Phase = "failed"
+		}
 		if result.Delivered && m.run.MinimumGbps != nil {
 			eval := result.Evaluation
 			switch {

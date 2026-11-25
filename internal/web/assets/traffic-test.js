@@ -106,6 +106,14 @@ function testResult(run, root=$('traffic-test-result')) {
   }else if(traffic?.delivered && run.test?.startsWith('iperf-')){
     root.append(text('p',run.testNamespace?'Connectivity check · no throughput threshold.':'Connectivity check · sender rate '+(run.senderMbps||1)+' Mbit/s · no throughput threshold.','note'));
   }
+  if(traffic?.offload?.length){
+    root.append(text('h3','TFT hardware offload validation'));
+    for(const result of traffic.offload){
+      root.append(badge((result.role?result.role+' · ':'')+(result.passed?'Passed':'Failed'),result.passed?'green':'red'));
+      if(result.reason)root.append(text('p',result.reason));
+    }
+    root.append(text('p','The TFT runner log contains the representor counters before and after traffic.','note'));
+  }
   if(traffic?.log){
     const log=text('details','');
     log.append(text('summary','TFT runner log'),text('pre',traffic.log));

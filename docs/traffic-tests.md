@@ -49,6 +49,13 @@ Each UI request creates `ovn-sdn-ft-config-user` in the chart's namespace:
 | Test duration | `TFT_IPERF_TIME` or `TFT_CURL_TIME`, from the selected profile |
 | Minimum throughput | `TFT_PERF_MIN_TPUT`; zero for a connectivity check |
 
+TCP runs also set `TFT_PLUGINS=validate_offload`. TFT's existing plugin
+finds each endpoint's VF representor and samples kernel ethtool RX and TX
+packet counters before and after traffic. OVN-Light shows its native client/server
+verdicts separately from traffic delivery and throughput. The TFT runner log
+contains the sampled counters and failure details; TFT owns the validation
+thresholds and logic.
+
 OVN-Light then creates a Job from the installed CronJob's `jobTemplate`, keeping
 its image, entrypoint, service account, pull secrets and resource configuration.
 The Job imports `ovn-sdn-ft-config` first and `ovn-sdn-ft-config-user` second.

@@ -97,6 +97,9 @@ func (m *Manager) startHelm(ctx context.Context, id string, q Request) (*batch.J
 	if q.MinimumGbps != nil {
 		data["TFT_PERF_MIN_TPUT"] = strconv.FormatFloat(*q.MinimumGbps, 'g', -1, 64)
 	}
+	if profile.ID == defaultTest {
+		data["TFT_PLUGINS"] = "validate_offload"
+	}
 	j := &batch.Job{
 		ObjectMeta: meta.ObjectMeta{Name: jobName, Namespace: ns, Labels: map[string]string{runLabel: id, "app.kubernetes.io/managed-by": "ovn-light"}},
 		Spec:       *cron.Spec.JobTemplate.Spec.DeepCopy(),
@@ -164,6 +167,7 @@ func (m *Manager) startHelm(ctx context.Context, id string, q Request) (*batch.J
 
 var chartSummary = regexp.MustCompile(`Test ID: \([0-9]+\) ([A-Z0-9_]+), Test Type: (IPERF_TCP|HTTP), (.*)`)
 var chartBitrate = regexp.MustCompile(`TX Bitrate: ([0-9.eE+\-]+) Gbps, RX Bitrate: ([0-9.eE+\-]+) Gbps`)
+var chartOffload = regexp.MustCompile(`plugin (validate_offload)(?: \(([^)]+)\))?, (succeeded|failed)(?:: ([^\r\n]*))?`)
 
 func (m *Manager) helmResult(ctx context.Context, pod *core.Pod, job *batch.Job) (Traffic, error) {
 	result := Traffic{Test: job.Annotations["ovn-light.io/test"], Case: job.Annotations["ovn-light.io/case"]}
@@ -176,6 +180,19 @@ func (m *Manager) helmResult(ctx context.Context, pod *core.Pod, job *batch.Job)
 		return result, fmt.Errorf("read TFT result log: %w", err)
 	}
 	result.Log = string(raw[max(0, len(raw)-(32<<10)):])
+	for _, match := range chartOffload.FindAllStringSubmatch(string(raw), -1) {
+		verdict := OffloadValidation{Plugin: match[1], Role: match[2], Passed: match[3] == "succeeded", Reason: match[4]}
+		found := false
+		for i, old := range result.Offload {
+			if old.Plugin == verdict.Plugin && old.Role == verdict.Role {
+				result.Offload[i], found = verdict, true
+				break
+			}
+		}
+		if !found {
+			result.Offload = append(result.Offload, verdict)
+		}
+	}
 	wantType := "IPERF_TCP"
 	if result.Test == "http" {
 		wantType = "HTTP"

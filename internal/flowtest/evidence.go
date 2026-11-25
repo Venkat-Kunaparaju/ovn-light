@@ -31,21 +31,39 @@ type Evaluation struct {
 	Reason      string   `json:"reason,omitempty"`
 }
 type Traffic struct {
-	Evaluation    *Evaluation `json:"evaluation,omitempty"`
-	Test          string      `json:"test,omitempty"`
-	Case          string      `json:"case,omitempty"`
-	TargetIP      string      `json:"targetIP,omitempty"`
-	Transactions  float64     `json:"transactionsPerSecond,omitempty"`
-	Loss          *float64    `json:"lostPercent,omitempty"`
-	Jitter        *float64    `json:"jitterMs,omitempty"`
-	Delivered     bool        `json:"delivered"`
-	Bytes         int64       `json:"bytes,omitempty"`
-	BPS           float64     `json:"bps,omitempty"`
-	SourceIP      string      `json:"sourceIP,omitempty"`
-	DestinationIP string      `json:"destinationIP,omitempty"`
-	Error         string      `json:"error,omitempty"`
-	Log           string      `json:"log,omitempty"`
+	Offload       []OffloadValidation `json:"offload,omitempty"`
+	Evaluation    *Evaluation         `json:"evaluation,omitempty"`
+	Test          string              `json:"test,omitempty"`
+	Case          string              `json:"case,omitempty"`
+	TargetIP      string              `json:"targetIP,omitempty"`
+	Transactions  float64             `json:"transactionsPerSecond,omitempty"`
+	Loss          *float64            `json:"lostPercent,omitempty"`
+	Jitter        *float64            `json:"jitterMs,omitempty"`
+	Delivered     bool                `json:"delivered"`
+	Bytes         int64               `json:"bytes,omitempty"`
+	BPS           float64             `json:"bps,omitempty"`
+	SourceIP      string              `json:"sourceIP,omitempty"`
+	DestinationIP string              `json:"destinationIP,omitempty"`
+	Error         string              `json:"error,omitempty"`
+	Log           string              `json:"log,omitempty"`
 }
+
+type OffloadValidation struct {
+	Plugin string `json:"plugin"`
+	Role   string `json:"role,omitempty"`
+	Passed bool   `json:"passed"`
+	Reason string `json:"reason,omitempty"`
+}
+
+func (t Traffic) offloadFailed() bool {
+	for _, result := range t.Offload {
+		if !result.Passed {
+			return true
+		}
+	}
+	return false
+}
+
 type Run struct {
 	TestSettings
 	TestNamespace string         `json:"testNamespace,omitempty"`

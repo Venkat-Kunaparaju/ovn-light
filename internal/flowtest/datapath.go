@@ -59,7 +59,7 @@ func (r *Run) recordTestFlows(n *NodeEvidence, samples []model.TestPathSample) {
 		// The request enters OVS at the client port and leaves OVS at the server port.
 		forward := client == p.Outbound
 		src, dst := r.Source.IP, r.Destination.IP
-		sport, dport := profile.ports()
+		sport, dport := r.ports()
 		direction := "client → server"
 		if !forward {
 			src, dst = dst, src

@@ -2,40 +2,83 @@
 
 Open **Hardware Offload → Run traffic test**, or open a traffic link in **Topology** and choose **Run traffic test**. Pick a test type, test case and source node. For a cross-node case, also pick the destination node. A topology link preselects its nodes. You can change either endpoint before clicking **Start test**. Follow running and completed tests in **Traffic test history** on Hardware Offload. The Issues page also shows the three most recent runs. Select a run to open its saved measurements and per-node evidence.
 
-The two pods run in the `ovn-light-tests` namespace on the cluster default network. For a ClusterIP case, the runner also creates a temporary Service that selects only this run’s server. The result shows its virtual IP and the backend pod IP. Policies selecting application pods can differ from those selecting the test pods. The picker uses the test types from the [pinned upstream suite](https://github.com/ovn-kubernetes/kubernetes-traffic-flow-tests/tree/9f911a119c7f3008efca1fff9750985810a34603).
+The test pods run on the cluster default network in a unique
+`ovn-light-tests-<run-id>` namespace. For a ClusterIP case, TFT also creates a
+temporary Service. Policies selecting application pods can differ from those
+selecting these test pods.
 
-| Test type | What it measures | Available path |
-| --- | --- | --- |
-| iperf3 TCP | Receiver bytes and bitrate over 120 seconds at a 1 Mbit/s sender target | Pod IP or ClusterIP |
-| iperf3 UDP | Receiver bytes, bitrate, packet loss and jitter under the same limit | Pod IP or ClusterIP |
-| HTTP response | One request with a verified response body | Pod IP or ClusterIP, IPv4 |
-| Simple TCP echo | Bytes echoed and verified over 10 seconds, up to 1 KiB per exchange | Pod IP or ClusterIP, IPv4 |
-| Netperf TCP stream | Available TCP throughput during a 5-second stream | Pod IP or ClusterIP |
-| Netperf TCP request/response | Completed transactions per second over 5 seconds | Pod IP or ClusterIP |
-| RDMA write, read or send bandwidth | Bandwidth over 10 seconds for write/read or 1,000 iterations for send | Device-backed pods using pod IPs |
+The picker offers TCP iperf and HTTP, using same-node or different-node placement
+and either pod IP or ClusterIP paths. TCP iperf runs for 120 seconds at the
+available bandwidth. A **Connectivity check** has no minimum throughput. For a
+**Throughput check**, enter a minimum in Gbit/s; TFT evaluates the measurement
+against that threshold. HTTP verifies a response. Only one test runs at a time.
 
-The default iperf **Connectivity check** targets 1 Mbit/s. A delivery verdict confirms that the selected endpoints exchanged data. To grade bandwidth, select **Throughput check** and enter a minimum in Gbit/s. For iperf you can independently set the sender rate in Mbit/s. The sender rate starts at 1 Mbit/s even when you enter a higher minimum. For example, a 1 Mbit/s sender can exercise a 0.0005 Gbit/s minimum on KIND. A 15 Gbit/s minimum requires a suitably provisioned link and sufficient offered traffic. The runner passes the minimum to the pinned TFT evaluator for the selected case and direction. The result includes the suite’s measured TX and RX values where available. A delivered transfer below threshold is recorded as a failed throughput check, with delivery and evaluator verdict shown separately. HTTP, echo and Netperf request/response do not produce bandwidth verdicts.
+## Use the TFT Helm chart
 
-Each path supports same-node and different-node placement. The direct cases use `POD_TO_POD_SAME_NODE` and `POD_TO_POD_DIFF_NODE`. Service cases use their `POD_TO_CLUSTER_IP_TO_POD` counterparts. Netperf and RDMA use the available bandwidth. The Netperf runner binds a separate data socket and allows up to 30 seconds for measurement and socket shutdown. RDMA uses direct pod addresses. Only one test runs at a time.
+OVN-Light uses the traffic flow tests Helm chart.
+Install that chart using its deployment instructions, values and registry
+credentials. Keep its `ovn-sdn-flow-tests` CronJob suspended. Use a dedicated
+chart installation for OVN-Light so it does not share the one-shot user
+ConfigMap with another test launcher. No TFT source or image changes are needed.
 
-## Install on an existing KIND demo
-
-Use the demo kubeconfig. From the repository root:
+The flow-test namespace defaults to `ovn-k8s-flow-tests`. Set
+`OVN_LIGHT_TRAFFIC_TEST_NAMESPACE` only when the chart is installed in another
+namespace. For a server running directly on a host:
 
 ```sh
-python3 scripts/local-kind-budget.py limit ovn-light-demo
-docker build -t ovn-light-tft:9f911a1-v3 runner/traffic-test
-kind load docker-image --name ovn-light-demo ovn-light-tft:9f911a1-v3
-kubectl --context kind-ovn-light-demo apply -f deploy/traffic-test.yaml
-scripts/deploy-kind.sh ovn-light-demo
+export OVN_LIGHT_TOKEN="$(cat .ovn-light-token)"
+go run ./cmd/ovn-light --kubeconfig /etc/kubernetes/admin.conf \
+  --enable-writes --data-dir .data
 ```
 
-For other clusters, publish the runner image to an accessible registry and set `OVN_LIGHT_TRAFFIC_TEST_IMAGE` in the `ovn-light-traffic-test` ConfigMap before starting the OVN-Light Deployment. If your default OVN network obtains a VF through an extended Kubernetes resource, set `OVN_LIGHT_TRAFFIC_TEST_DEVICE_RESOURCE` to its resource name. Each endpoint requests one device. For RDMA, explicitly configure `OVN_LIGHT_TRAFFIC_TEST_RDMA_RESOURCE` with the RDMA-capable resource exposed on the default network. RDMA tests use that resource on both endpoints and require a working RDMA device, fabric and sufficient locked memory. The picker checks advertised capacity (two devices for the same-node case). The Kubernetes scheduler checks current availability. The runner uses the live server’s write-enabled mode. Removing the runner configuration and restarting OVN-Light disables new runs.
+For the OVN-Light Deployment, apply `deploy/traffic-test-helm.yaml` and restart
+the Deployment. That manifest grants access to the chart's CronJob, Jobs, logs
+and configuration, and sets `OVN_LIGHT_TRAFFIC_TEST_NAMESPACE` through the
+existing `ovn-light-traffic-test` ConfigMap. Change its namespace fields and
+environment value if the chart is installed elsewhere. The chart owns the TFT
+runner's service account, permissions, job image and endpoint image.
+
+Each UI request creates `ovn-sdn-ft-config-user` in the chart's namespace:
+
+| UI input | User ConfigMap key |
+| --- | --- |
+| Test case | `TFT_TEST_CASES` |
+| Source node | `TFT_REQ_REMOTE_CLIENT_NODE` |
+| Destination node | `TFT_REQ_SERVER_NODE` |
+| TCP iperf or HTTP | `TFT_IPERF` and `TFT_CURL` |
+| Test duration | `TFT_IPERF_TIME` or `TFT_CURL_TIME`, from the selected profile |
+| Minimum throughput | `TFT_PERF_MIN_TPUT`; zero for a connectivity check |
+
+OVN-Light then creates a Job from the installed CronJob's `jobTemplate`, keeping
+its image, entrypoint, service account, pull secrets and resource configuration.
+The Job imports `ovn-sdn-ft-config` first and `ovn-sdn-ft-config-user` second.
+TFT reads those environment values, deletes the user ConfigMap, generates its
+configuration and runs `tft.py --check`. OVN-Light recreates the user ConfigMap
+for the next request; it refuses to overwrite one that already exists. The
+chart's `TFT_SKIP_TESTS` is preserved, and selecting a skipped case is rejected.
+
+Runs disable additional target-access subtests and deferred cleanup. TFT creates
+and cleans up its own endpoints. OVN-Light records the native runner's summary
+and log before deleting its Job. Running tests requires the server's
+write-enabled mode. Images and endpoint resources come from the chart; OVN-Light
+accepts only the flow-test namespace as runner configuration.
 
 ## How to read the result
 
-The DaemonSet uses its usual collection interval. While temporary test pods exist, their nodes include a bounded set of cached OVS rules anchored to each pod’s local datapath port and UID. Open the software, partial-offload, hardware or unknown groups under each node to inspect raw matches, actions and counters. A shared match identifies a test pod port and compatible masked fields. Its counters can include other packets through that rule. The dashboard retains up to 32 distinct flow entries per node per run, including on software-only KIND. Raw lines are limited to 4 KiB. OVN-Light records test pod UIDs and the network, and matches exact pod endpoint tuples in either direction. For iperf it also checks the selected transport, source port 35201 and destination port 5201. For HTTP and echo it checks TCP and the test server port. A Service path can expose the backend tuple after address translation. A short test can finish between samples. For Netperf the collector matches TCP data port 35202 to 5202 and excludes the control socket on port 5201. RDMA has a separate data plane, so its results include the upstream measurement and node status without attributing the TCP control connection to RDMA data. Masked tuples and missing samples can leave a node inconclusive. No hardware evaluation is possible on software-only KIND nodes.
+Collectors use their usual collection interval. While temporary test pods exist,
+their nodes include a bounded set of cached OVS rules anchored to each pod's
+local datapath port and UID. Open the software, partial-offload, hardware or
+unknown groups under each node to inspect matches, actions and counters. A
+shared rule's counters can include other traffic. OVN-Light retains up to 32 flow
+entries per node per run and limits raw lines to 4 KiB. It matches pod endpoint
+tuples and the configured test server port; client ports are not fixed. A
+Service path can expose the virtual IP before translation. Short tests can finish
+between samples, and missing or masked evidence can leave a node inconclusive.
+Software-only KIND nodes cannot demonstrate hardware offload.
 
 Expand a matched path for individual recirculation IDs, stage states, provider reasons and partial-packet counter deltas. DOCA entries show the zone, observed direction, original and reply offload flags, and any deferred-reply reason supplied by the provider. Deltas may cover shared stages. A persistent issue requires the collector’s usual activity and grace checks. A successful transfer can still contain software stages. If the collector identifies a matching denying ACL, its details accompany the traffic result. [Hardware offload evidence](offload.md)
 
-One fixed Kubernetes Job serializes runs. The Go API accepts a test type, a case, node names and a network. Existing clients that omit the type and case run the original cross-node TCP test. The pinned Python adapter runs one pre-provisioned upstream case in a dedicated namespace. Its ServiceAccount can inspect nodes, create or exec into test pods, and create or read test Services in that namespace. The test pods run without an API token or host mounts. Resource limits and deadlines bound all three pods. The Job owns its endpoint pods and temporary Service. OVN-Light atomically saves the latest 30 runs in its data directory on the server PVC, imports the previous single-result format, and deletes the completed Job and its dependents. The Job TTL also covers interrupted cleanup. Evidence is collected while the server is running; a server interruption can leave gaps.
+One fixed Kubernetes Job serializes runs. OVN-Light saves the latest 30 runs in
+its data directory and deletes each completed Job after collecting its result.
+The chart's TTL also covers interrupted Job cleanup. Evidence is collected while
+the server is running; a server interruption can leave gaps.

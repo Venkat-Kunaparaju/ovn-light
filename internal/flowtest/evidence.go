@@ -44,25 +44,28 @@ type Traffic struct {
 	SourceIP      string      `json:"sourceIP,omitempty"`
 	DestinationIP string      `json:"destinationIP,omitempty"`
 	Error         string      `json:"error,omitempty"`
+	Log           string      `json:"log,omitempty"`
 }
 type Run struct {
 	TestSettings
-	TestName    string         `json:"testName,omitempty"`
-	CaseName    string         `json:"caseName,omitempty"`
-	Test        string         `json:"test,omitempty"`
-	Case        string         `json:"case,omitempty"`
-	ServiceIP   string         `json:"serviceIP,omitempty"`
-	ID          string         `json:"id"`
-	JobUID      string         `json:"jobUID"`
-	Phase       string         `json:"phase"`
-	Network     string         `json:"network"`
-	Source      Endpoint       `json:"source"`
-	Destination Endpoint       `json:"destination"`
-	Started     time.Time      `json:"started"`
-	Finished    *time.Time     `json:"finished,omitempty"`
-	Nodes       []NodeEvidence `json:"nodes,omitempty"`
-	Traffic     *Traffic       `json:"traffic,omitempty"`
-	Drop        string         `json:"drop,omitempty"`
+	TestNamespace string         `json:"testNamespace,omitempty"`
+	ServerPort    int            `json:"serverPort,omitempty"`
+	TestName      string         `json:"testName,omitempty"`
+	CaseName      string         `json:"caseName,omitempty"`
+	Test          string         `json:"test,omitempty"`
+	Case          string         `json:"case,omitempty"`
+	ServiceIP     string         `json:"serviceIP,omitempty"`
+	ID            string         `json:"id"`
+	JobUID        string         `json:"jobUID"`
+	Phase         string         `json:"phase"`
+	Network       string         `json:"network"`
+	Source        Endpoint       `json:"source"`
+	Destination   Endpoint       `json:"destination"`
+	Started       time.Time      `json:"started"`
+	Finished      *time.Time     `json:"finished,omitempty"`
+	Nodes         []NodeEvidence `json:"nodes,omitempty"`
+	Traffic       *Traffic       `json:"traffic,omitempty"`
+	Drop          string         `json:"drop,omitempty"`
 }
 
 func (p Profile) ports() (client, server string) {
@@ -76,6 +79,24 @@ func (p Profile) ports() (client, server string) {
 	}
 }
 
+func (r *Run) ports() (client, server string) {
+	if r.TestNamespace != "" {
+		return "", strconv.Itoa(r.ServerPort)
+	}
+	profile, _ := lookupProfile(r.Test)
+	return profile.ports()
+}
+
+func (r *Run) nativeRole(name string) string {
+	if name == "normal-pod-server-"+strconv.Itoa(r.ServerPort) {
+		return "server"
+	}
+	if name == "normal-pod-same-node-client" || name == "normal-pod-diff-node-client" {
+		return "client"
+	}
+	return ""
+}
+
 func (r *Run) matches(p model.OffloadPath) bool {
 	profile, _ := lookupProfile(r.Test)
 	t := p.Tuple
@@ -84,7 +105,7 @@ func (r *Run) matches(p model.OffloadPath) bool {
 	}
 	src, dst := r.Source, r.Destination
 	clientPort, serverPort := t.SourcePort, t.DestinationPort
-	wantClient, wantServer := profile.ports()
+	wantClient, wantServer := r.ports()
 	if t.SourcePort == wantServer {
 		src, dst = dst, src
 		clientPort, serverPort = t.DestinationPort, t.SourcePort
@@ -115,8 +136,21 @@ func (r *Run) observe(v model.View, report model.OffloadReport, inv model.Invent
 	// TFT connects to status.podIP. A dual-stack pod can have two attachments
 	// in the inventory; only the one on the test socket can identify this run.
 	primary := map[string]string{}
+	testNS := namespace
+	if r.TestNamespace != "" {
+		testNS = r.TestNamespace
+	}
 	for _, pod := range inv.Pods {
-		if pod.Namespace != namespace || pod.Labels[runLabel] != r.ID {
+		if pod.Namespace != testNS {
+			continue
+		}
+		if r.TestNamespace != "" {
+			if pod.Labels["tft-pod-name"] == pod.Name && r.nativeRole(pod.Name) != "" && !pod.CreationTimestamp.Time.Before(r.Started) {
+				primary[string(pod.UID)] = pod.Status.PodIP
+			}
+			continue
+		}
+		if pod.Labels[runLabel] != r.ID {
 			continue
 		}
 		for _, owner := range pod.OwnerReferences {
@@ -128,7 +162,16 @@ func (r *Run) observe(v model.View, report model.OffloadReport, inv model.Invent
 	scenario, _ := lookupCase(r.Case)
 	if scenario.Service && r.ServiceIP == "" {
 		for _, svc := range inv.Services {
-			if svc.Namespace != namespace || svc.Labels[runLabel] != r.ID {
+			if svc.Namespace != testNS {
+				continue
+			}
+			if r.TestNamespace != "" {
+				if r.nativeRole(svc.Spec.Selector["tft-pod-name"]) == "server" && !svc.CreationTimestamp.Time.Before(r.Started) {
+					r.ServiceIP = svc.Spec.ClusterIP
+				}
+				continue
+			}
+			if svc.Labels[runLabel] != r.ID {
 				continue
 			}
 			for _, owner := range svc.OwnerReferences {
@@ -139,11 +182,15 @@ func (r *Run) observe(v model.View, report model.OffloadReport, inv model.Invent
 		}
 	}
 	for _, pod := range v.Pods {
-		if pod.Namespace != namespace || pod.Network != r.Network || pod.Role != "primary" || pod.IP == "" || pod.IP != primary[pod.UID] || pod.Labels[runLabel] != r.ID {
+		if pod.Namespace != testNS || pod.Network != r.Network || pod.Role != "primary" || pod.IP == "" || pod.IP != primary[pod.UID] {
 			continue
 		}
+		role := pod.Labels["ovn-light.io/role"]
+		if r.TestNamespace != "" {
+			role = r.nativeRole(pod.Pod)
+		}
 		var e *Endpoint
-		switch pod.Labels["ovn-light.io/role"] {
+		switch role {
 		case "client":
 			e = &r.Source
 		case "server":
@@ -230,7 +277,7 @@ func (r *Run) observe(v model.View, report model.OffloadReport, inv model.Invent
 		}
 	}
 	profile, _ := lookupProfile(r.Test)
-	_, serverPort := profile.ports()
+	_, serverPort := r.ports()
 	for _, f := range v.Findings {
 		if r.Source.UID != "" && r.Destination.UID != "" && f.Source.UID == r.Source.UID && f.Destination.UID == r.Destination.UID && f.Source.Network == r.Network && strconv.Itoa(f.Destination.Port) == serverPort && profile.Protocol != "" && strings.EqualFold(f.Protocol, profile.Protocol) && f.Delta != nil && *f.Delta > 0 && !f.SharedCounter && f.ObservedAt.After(r.Started) {
 			for _, c := range f.Causes {

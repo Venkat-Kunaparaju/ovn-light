@@ -34,11 +34,11 @@ function configureTestMode() {
   if(!bandwidth)mode.value='connectivity';
   $('test-mode-label').hidden=!bandwidth;
   const evaluate=bandwidth && mode.value==='throughput';
-  for(const [prefix,enabled] of [['test-min',evaluate],['test-rate',evaluate && iperf]]) {
+  for(const [prefix,enabled] of [['test-min',evaluate],['test-rate',evaluate && iperf && catalog?.runner!=='helm']]) {
     $(prefix+'-label').hidden=!enabled;
     $(prefix).disabled=!enabled;
   }
-  $('traffic-test-description').textContent=evaluate && iperf ?
+  $('traffic-test-description').textContent=catalog?.runner==='helm' ? profile.description : evaluate && iperf ?
     'One paced stream for 120 seconds. The upstream evaluator compares the measured throughput with your minimum.' : profile.description;
   updateTestForm();
 }
@@ -104,7 +104,12 @@ function testResult(run, root=$('traffic-test-result')) {
       if(e.reason)root.append(text('p',e.reason,'note'));
     }else root.append(text('p',run.finished?(traffic?.error || 'No throughput measurement to evaluate.'):'Awaiting measurement.','note'));
   }else if(traffic?.delivered && run.test?.startsWith('iperf-')){
-    root.append(text('p','Connectivity check · sender rate '+(run.senderMbps||1)+' Mbit/s · no throughput threshold.','note'));
+    root.append(text('p',run.testNamespace?'Connectivity check · no throughput threshold.':'Connectivity check · sender rate '+(run.senderMbps||1)+' Mbit/s · no throughput threshold.','note'));
+  }
+  if(traffic?.log){
+    const log=text('details','');
+    log.append(text('summary','TFT runner log'),text('pre',traffic.log));
+    root.append(log);
   }
   if (run.drop) root.append(text('p','Matching policy drop · '+run.drop));
   for (const n of run.nodes || []) {

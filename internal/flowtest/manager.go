@@ -53,6 +53,7 @@ type Status struct {
 type Manager struct {
 	client                    kubernetes.Interface
 	image, device, rdma, file string
+	helmNamespace             string
 	wake                      chan struct{}
 	operation                 sync.Mutex
 	mu                        sync.Mutex
@@ -250,7 +251,9 @@ func runFromJob(j *batch.Job) *Run {
 	testCase, _ := lookupCase(j.Annotations["ovn-light.io/case"])
 	var settings TestSettings
 	_ = json.Unmarshal([]byte(j.Annotations["ovn-light.io/settings"]), &settings)
+	serverPort, _ := strconv.Atoi(j.Annotations["ovn-light.io/server-port"])
 	return &Run{
+		TestNamespace: j.Annotations["ovn-light.io/test-namespace"], ServerPort: serverPort,
 		TestSettings: settings, Test: profile.ID, TestName: profile.Name, Case: testCase.ID, CaseName: testCase.Name,
 		ID: j.Labels[runLabel], JobUID: string(j.UID), Network: "default", Phase: "running",
 		Source: Endpoint{Node: src}, Destination: Endpoint{Node: dst}, Started: j.CreationTimestamp.Time, Nodes: nodes,
@@ -278,7 +281,13 @@ func (m *Manager) Start(ctx context.Context, q Request) (Status, error) {
 	if q.SenderMbps < 0 || q.SenderMbps > 1000000 || q.SenderMbps != 0 && (!iperf || q.MinimumGbps == nil) {
 		return Status{}, fmt.Errorf("choose an iperf throughput check to set a sender rate of 1–1000000 Mbit/s")
 	}
-	if iperf && q.SenderMbps == 0 {
+	if m.helmNamespace != "" && q.SenderMbps != 0 {
+		return Status{}, fmt.Errorf("the TFT chart generator does not support setting a sender rate")
+	}
+	if m.helmNamespace != "" && profile.ID != defaultTest && profile.ID != "http" {
+		return Status{}, fmt.Errorf("the TFT chart generator supports iperf3 TCP and HTTP")
+	}
+	if iperf && q.SenderMbps == 0 && m.helmNamespace == "" {
 		q.SenderMbps = 1
 	}
 	if q.Network != "default" {
@@ -327,25 +336,33 @@ func (m *Manager) Start(ctx context.Context, q Request) (Status, error) {
 	}
 	// TFT reuses its pod and Service names. Job deletion can finish while an
 	// endpoint still terminates, so keep a new run from attaching to it.
-	selector := meta.ListOptions{LabelSelector: runLabel, Limit: 1}
-	pods, err := m.client.CoreV1().Pods(namespace).List(ctx, selector)
-	if err != nil {
-		return Status{}, err
-	}
-	if len(pods.Items) > 0 {
-		return m.Status(), fmt.Errorf("previous test pods are being cleaned up; try again shortly")
-	}
-	if testCase.Service {
-		services, err := m.client.CoreV1().Services(namespace).List(ctx, selector)
+	if m.helmNamespace == "" {
+		selector := meta.ListOptions{LabelSelector: runLabel, Limit: 1}
+		pods, err := m.client.CoreV1().Pods(namespace).List(ctx, selector)
 		if err != nil {
 			return Status{}, err
 		}
-		if len(services.Items) > 0 {
-			return m.Status(), fmt.Errorf("previous test Service is being cleaned up; try again shortly")
+		if len(pods.Items) > 0 {
+			return m.Status(), fmt.Errorf("previous test pods are being cleaned up; try again shortly")
+		}
+		if testCase.Service {
+			services, err := m.client.CoreV1().Services(namespace).List(ctx, selector)
+			if err != nil {
+				return Status{}, err
+			}
+			if len(services.Items) > 0 {
+				return m.Status(), fmt.Errorf("previous test Service is being cleaned up; try again shortly")
+			}
 		}
 	}
 	id := strings.ToLower(rand.Text())
-	j, err := m.client.BatchV1().Jobs(namespace).Create(ctx, jobSpec(m.image, dev, id, q), meta.CreateOptions{})
+	var j *batch.Job
+	var err error
+	if m.helmNamespace != "" {
+		j, err = m.startHelm(ctx, id, q)
+	} else {
+		j, err = m.client.BatchV1().Jobs(namespace).Create(ctx, jobSpec(m.image, dev, id, q), meta.CreateOptions{})
+	}
 	if apierrors.IsAlreadyExists(err) {
 		return m.Status(), fmt.Errorf("a test is running or its pods are being cleaned up")
 	}
@@ -392,7 +409,7 @@ func (m *Manager) Monitor(ctx context.Context) {
 func (m *Manager) reconcile(ctx context.Context) error {
 	m.operation.Lock()
 	defer m.operation.Unlock()
-	jobs := m.client.BatchV1().Jobs(namespace)
+	jobs := m.client.BatchV1().Jobs(m.jobNamespace())
 	j, err := jobs.Get(ctx, jobName, meta.GetOptions{})
 	if apierrors.IsNotFound(err) {
 		m.mu.Lock()
@@ -432,13 +449,24 @@ func (m *Manager) reconcile(ctx context.Context) error {
 			return nil
 		}
 		result := Traffic{Error: reason}
-		pods, err := m.client.CoreV1().Pods(namespace).List(ctx, meta.ListOptions{LabelSelector: "batch.kubernetes.io/controller-uid=" + string(j.UID)})
+		pods, err := m.client.CoreV1().Pods(m.jobNamespace()).List(ctx, meta.ListOptions{LabelSelector: "batch.kubernetes.io/controller-uid=" + string(j.UID)})
 		if err != nil {
 			return err
 		}
 		for _, p := range pods.Items {
 			if !meta.IsControlledBy(&p, j) {
 				continue
+			}
+			if m.helmNamespace != "" {
+				result, err = m.helmResult(ctx, &p, j)
+				if err != nil {
+					return err
+				}
+				if !complete && (result.Evaluation == nil || result.Evaluation.Passed) {
+					result.Delivered = false
+					result.Error = strings.TrimSpace("TFT Job failed. " + reason + " " + result.Error)
+				}
+				break
 			}
 			for _, c := range p.Status.ContainerStatuses {
 				if t := c.State.Terminated; c.Name == "runner" && t != nil {
@@ -491,8 +519,9 @@ func (m *Manager) reconcile(ctx context.Context) error {
 	if j.DeletionTimestamp != nil {
 		return nil
 	}
-	// Only delete the Job whose result was collected. Its owner references
-	// also remove the test endpoints on success, failure or timeout.
+	if err := m.cleanupHelmConfig(ctx, j); err != nil {
+		return err
+	}
 	uid := types.UID(j.UID)
 	err = jobs.Delete(ctx, jobName, meta.DeleteOptions{Preconditions: &meta.Preconditions{UID: &uid}, PropagationPolicy: ptr.To(meta.DeletePropagationForeground)})
 	if apierrors.IsNotFound(err) {

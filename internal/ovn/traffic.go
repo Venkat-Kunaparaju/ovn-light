@@ -23,7 +23,9 @@ func newTrafficIndex(inv model.Inventory, attachments []Attachment) trafficIndex
 	x := trafficIndex{testPorts: map[string]map[string]string{}, attachments: attachments, ip: map[string][]model.Endpoint{}, mac: map[string][]model.Endpoint{}, hosts: map[string]string{}}
 	for _, a := range attachments {
 		ep := a.Endpoint
-		if ep.Namespace == "ovn-light-tests" && ep.Network == "default" && a.Primary && ep.Labels["ovn-light.io/run"] != "" {
+		legacyTest := ep.Namespace == "ovn-light-tests" && ep.Labels["ovn-light.io/run"] != ""
+		chartTest := strings.HasPrefix(ep.Namespace, "ovn-light-tests-") && ep.Labels["tft-pod-name"] != ""
+		if (legacyTest || chartTest) && ep.Network == "default" && a.Primary {
 			if x.testPorts[a.Node] == nil {
 				x.testPorts[a.Node] = map[string]string{}
 			}

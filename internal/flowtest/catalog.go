@@ -88,6 +88,7 @@ type NodeOption struct {
 	RDMADevices int64  `json:"rdmaDevices"`
 }
 type Options struct {
+	Runner       string       `json:"runner,omitempty"`
 	Profiles     []Profile    `json:"profiles"`
 	Cases        []TestCase   `json:"cases"`
 	Nodes        []NodeOption `json:"nodes"`
@@ -100,6 +101,12 @@ func (m *Manager) Options(ctx context.Context) (Options, error) {
 	o := Options{Profiles: profiles, Cases: cases, Nodes: []NodeOption{}}
 	if m == nil {
 		return o, nil
+	}
+	if m.helmNamespace != "" {
+		o.Runner = "helm"
+		o.Profiles = []Profile{profiles[0], profiles[2]}
+		o.Profiles[0].Description = "Run TCP iperf for 120 seconds using the installed TFT chart."
+		o.Profiles[1].Description = "Verify an HTTP response using the installed TFT chart."
 	}
 	o.Device, o.RDMAResource = m.device, m.rdma
 	nodes, err := m.client.CoreV1().Nodes().List(ctx, meta.ListOptions{})

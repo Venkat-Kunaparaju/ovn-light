@@ -74,7 +74,7 @@ func New(client kubernetes.Interface, image, device, rdma, dir string) (*Manager
 			var runs []*Run
 			err = json.Unmarshal(raw, &runs)
 			if err == nil && len(runs) > 0 {
-				m.run, m.previous = runs[0], runs[1:min(len(runs), historyLimit)]
+				m.run, m.previous = runs[0], runs[1:]
 			}
 		} else {
 			err = json.Unmarshal(raw, &m.run)
@@ -99,6 +99,9 @@ func New(client kubernetes.Interface, image, device, rdma, dir string) (*Manager
 	return m, nil
 }
 func (m *Manager) saveLocked() error {
+	if m.helmNamespace != "" {
+		m.trimHistoryLocked()
+	}
 	b, err := json.Marshal(append([]*Run{m.run}, m.previous...))
 	if err != nil {
 		return err
@@ -181,8 +184,10 @@ func (m *Manager) Observe(v model.View, r model.OffloadReport, inventory model.I
 	}
 	m.mu.Lock()
 	defer m.mu.Unlock()
-	if m.run != nil && m.run.Finished == nil {
-		m.run.observe(v, r, inventory)
+	for _, run := range append([]*Run{m.run}, m.previous...) {
+		if run != nil && run.JobUID != "" && run.Finished == nil {
+			run.observe(v, r, inventory)
+		}
 	}
 }
 
@@ -258,7 +263,7 @@ func runFromJob(j *batch.Job) *Run {
 	return &Run{
 		TestNamespace: j.Annotations["ovn-light.io/test-namespace"], ServerPort: serverPort,
 		TestSettings: settings, Test: profile.ID, TestName: profile.Name, Case: testCase.ID, CaseName: testCase.Name,
-		ID: j.Labels[runLabel], JobUID: string(j.UID), Network: "default", Phase: "running",
+		ID: j.Labels[runLabel], JobName: j.Name, JobUID: string(j.UID), Network: "default", Phase: "running",
 		Source: Endpoint{Node: src}, Destination: Endpoint{Node: dst}, Started: j.CreationTimestamp.Time, Nodes: nodes,
 	}
 }
@@ -315,7 +320,7 @@ func (m *Manager) Start(ctx context.Context, q Request) (Status, error) {
 	}
 	m.operation.Lock()
 	defer m.operation.Unlock()
-	if s := m.Status(); s.Run != nil && s.Run.Finished == nil {
+	if s := m.Status(); m.helmNamespace == "" && s.Run != nil && s.Run.Finished == nil {
 		return s, fmt.Errorf("a traffic test is already running")
 	}
 	nodeNames := []string{q.SourceNode}
@@ -366,13 +371,10 @@ func (m *Manager) Start(ctx context.Context, q Request) (Status, error) {
 		}
 	}
 	id := strings.ToLower(rand.Text())
-	var j *batch.Job
-	var err error
 	if m.helmNamespace != "" {
-		j, err = m.startHelm(ctx, id, q)
-	} else {
-		j, err = m.client.BatchV1().Jobs(namespace).Create(ctx, jobSpec(m.image, dev, id, q), meta.CreateOptions{})
+		return m.enqueue(id, q)
 	}
+	j, err := m.client.BatchV1().Jobs(namespace).Create(ctx, jobSpec(m.image, dev, id, q), meta.CreateOptions{})
 	if apierrors.IsAlreadyExists(err) {
 		return m.Status(), fmt.Errorf("a test is running or its pods are being cleaned up")
 	}
@@ -394,15 +396,16 @@ func (m *Manager) Start(ctx context.Context, q Request) (Status, error) {
 }
 
 func (m *Manager) Monitor(ctx context.Context) {
-	// A fixed Job name serializes runs across server restarts. Recover a Job
-	// created just before the server could write its local result file.
 	for {
 		err := m.reconcile(ctx)
 		if err != nil && ctx.Err() == nil {
 			log.Printf("traffic test: %v", err)
 		}
 		m.mu.Lock()
-		active := m.run != nil && m.run.Finished == nil
+		active := false
+		for _, run := range append([]*Run{m.run}, m.previous...) {
+			active = active || run != nil && run.Finished == nil
+		}
 		m.mu.Unlock()
 		var retry <-chan time.Time
 		if err != nil || active {
@@ -417,6 +420,9 @@ func (m *Manager) Monitor(ctx context.Context) {
 	}
 }
 func (m *Manager) reconcile(ctx context.Context) error {
+	if m.helmNamespace != "" {
+		return m.reconcileHelm(ctx)
+	}
 	m.operation.Lock()
 	defer m.operation.Unlock()
 	jobs := m.client.BatchV1().Jobs(m.jobNamespace())
@@ -443,7 +449,14 @@ func (m *Manager) reconcile(ctx context.Context) error {
 	if m.run == nil || m.run.JobUID != string(j.UID) {
 		m.replaceLocked(runFromJob(j))
 	}
-	finished := m.run.Finished != nil
+	run := m.run
+	m.mu.Unlock()
+	return m.reconcileJob(ctx, j, run)
+}
+
+func (m *Manager) reconcileJob(ctx context.Context, j *batch.Job, run *Run) error {
+	m.mu.Lock()
+	finished := run.Finished != nil
 	m.mu.Unlock()
 	if !finished {
 		terminal, complete := false, false
@@ -456,6 +469,23 @@ func (m *Manager) reconcile(ctx context.Context) error {
 			}
 		}
 		if !terminal {
+			if m.helmNamespace != "" {
+				pods, err := m.client.CoreV1().Pods(m.jobNamespace()).List(ctx, meta.ListOptions{LabelSelector: "batch.kubernetes.io/controller-uid=" + string(j.UID)})
+				if err != nil {
+					return err
+				}
+				phase := "starting"
+				for _, pod := range pods.Items {
+					for _, c := range pod.Status.ContainerStatuses {
+						if c.Name == "ovn-sdn-ft" && (c.State.Running != nil || c.State.Terminated != nil) {
+							phase = "running"
+						}
+					}
+				}
+				m.mu.Lock()
+				run.Phase = phase
+				m.mu.Unlock()
+			}
 			return nil
 		}
 		result := Traffic{Error: reason}
@@ -484,9 +514,9 @@ func (m *Manager) reconcile(ctx context.Context) error {
 					if json.Unmarshal([]byte(t.Message), &rec) == nil {
 						result = rec
 					}
-					profile, _ := lookupProfile(m.run.Test)
-					legacy := result.Test == "" && result.Case == "" && profile.ID == defaultTest && m.run.Case == crossPod
-					if !legacy && (result.Test != m.run.Test || result.Case != m.run.Case) && result.Delivered {
+					profile, _ := lookupProfile(run.Test)
+					legacy := result.Test == "" && result.Case == "" && profile.ID == defaultTest && run.Case == crossPod
+					if !legacy && (result.Test != run.Test || result.Case != run.Case) && result.Delivered {
 						result.Delivered = false
 						result.Error = "The runner returned a different test or case. Update the runner image."
 					}
@@ -498,25 +528,25 @@ func (m *Manager) reconcile(ctx context.Context) error {
 		}
 		m.mu.Lock()
 		now := time.Now().UTC()
-		m.run.Finished = &now
-		m.run.Traffic = &result
-		m.run.Phase = "completed"
+		run.Finished = &now
+		run.Traffic = &result
+		run.Phase = "completed"
 		if result.offloadFailed() {
-			m.run.Phase = "failed"
+			run.Phase = "failed"
 		}
-		if result.Delivered && m.run.MinimumGbps != nil {
+		if result.Delivered && run.MinimumGbps != nil {
 			eval := result.Evaluation
 			switch {
-			case eval == nil || eval.MinimumGbps != *m.run.MinimumGbps:
+			case eval == nil || eval.MinimumGbps != *run.MinimumGbps:
 				result.Evaluation = nil
-				m.run.Phase = "failed"
+				run.Phase = "failed"
 				result.Error = "The runner did not return the requested throughput evaluation."
 			case !eval.Passed:
-				m.run.Phase = "failed"
+				run.Phase = "failed"
 			}
 		}
 		if !result.Delivered {
-			m.run.Phase = "failed"
+			run.Phase = "failed"
 			if result.Error == "" {
 				result.Error = "The runner did not report a completed transfer."
 			}
@@ -524,7 +554,7 @@ func (m *Manager) reconcile(ctx context.Context) error {
 		m.mu.Unlock()
 	}
 	m.mu.Lock()
-	err = m.saveLocked()
+	err := m.saveLocked()
 	m.mu.Unlock()
 	if err != nil {
 		return err
@@ -536,7 +566,7 @@ func (m *Manager) reconcile(ctx context.Context) error {
 		return err
 	}
 	uid := types.UID(j.UID)
-	err = jobs.Delete(ctx, jobName, meta.DeleteOptions{Preconditions: &meta.Preconditions{UID: &uid}, PropagationPolicy: ptr.To(meta.DeletePropagationForeground)})
+	err = m.client.BatchV1().Jobs(m.jobNamespace()).Delete(ctx, j.Name, meta.DeleteOptions{Preconditions: &meta.Preconditions{UID: &uid}, PropagationPolicy: ptr.To(meta.DeletePropagationForeground)})
 	if apierrors.IsNotFound(err) {
 		return nil
 	}

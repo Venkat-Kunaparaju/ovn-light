@@ -13,7 +13,9 @@ Each run measures the available TCP bitrate for 120 seconds and reports TX and
 RX in Gbit/s. `TFT_PERF_MIN_TPUT` is fixed at `0`; there is no connectivity mode,
 HTTP test or user-entered throughput threshold.
 
-Only one test runs at a time. The iperf endpoints have separate pod IPs and use
+You can submit multiple runs. Requests are queued, and each runner starts once
+TFT deletes the previous run’s user ConfigMap. Traffic runs can then overlap.
+The iperf endpoints have separate pod IPs and use
 neither host networking nor host ports. TFT's runner and tools use host
 networking but do not bind the iperf server port.
 
@@ -42,7 +44,8 @@ existing `ovn-light-traffic-test` ConfigMap. Change its namespace fields and
 environment value if the chart is installed elsewhere. The chart owns the TFT
 runner's service account, permissions, job image and endpoint image.
 
-Each UI request creates `ovn-sdn-ft-config-user` in the chart's namespace:
+Each UI request is saved in the queue. When its turn arrives, OVN-Light creates
+`ovn-sdn-ft-config-user` in the chart's namespace:
 
 | UI input | User ConfigMap key |
 | --- | --- |
@@ -52,6 +55,7 @@ Each UI request creates `ovn-sdn-ft-config-user` in the chart's namespace:
 | TCP throughput | `TFT_IPERF=true`, `TFT_CURL=false` |
 | Test duration | `TFT_IPERF_TIME=120` |
 | Minimum throughput | `TFT_PERF_MIN_TPUT=0` |
+| Run namespace | `TFT_NAMESPACE=ovn-light-tests-<run-id>` |
 
 TCP runs also set `TFT_PLUGINS=validate_offload`. TFT's existing plugin
 finds each endpoint's VF representor and samples kernel ethtool RX and TX
@@ -65,7 +69,8 @@ its image, entrypoint, service account, pull secrets and resource configuration.
 The Job imports `ovn-sdn-ft-config` first and `ovn-sdn-ft-config-user` second.
 TFT reads the environment values, deletes the user ConfigMap, generates its
 configuration and runs `tft.py --check`. OVN-Light recreates the user ConfigMap
-for the next request and refuses to overwrite one that already exists. The
+for the next queued request after the previous runner deletes it, without waiting
+for that test to finish. It never overwrites an existing ConfigMap. The
 chart's `TFT_SKIP_TESTS` is preserved, and selecting a skipped case is rejected.
 
 Runs disable additional target-access subtests and deferred cleanup. TFT creates
@@ -89,8 +94,10 @@ Software-only KIND nodes cannot demonstrate hardware offload.
 
 Expand a matched path for individual recirculation IDs, stage states, provider reasons and partial-packet counter deltas. DOCA entries show the zone, observed direction, original and reply offload flags, and any deferred-reply reason supplied by the provider. Deltas may cover shared stages. A persistent issue requires the collector’s usual activity and grace checks. A successful transfer can still contain software stages. If the collector identifies a matching denying ACL, its details accompany the traffic result. [Hardware offload evidence](offload.md)
 
-The fixed `cross-node-tcp` Job name serializes runs, including across server
-restarts. OVN-Light saves the latest 30 runs in its data directory and deletes
-each completed Job after collecting its result. TFT cleans up its endpoint
+Each run uses a unique `ovn-light-tft-<run-id>` Job name. Jobs disable automatic
+retries and container restarts so an older runner cannot consume a newer run’s
+configuration. OVN-Light persists queued and active runs along with the latest
+30 completed runs, recovers its Jobs after a server restart, and deletes each
+completed Job after collecting its result. TFT cleans up its endpoint
 namespace. The chart's Job TTL also covers interrupted Job cleanup. Evidence is
 collected while the server is running; a server interruption can leave gaps.

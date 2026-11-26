@@ -53,21 +53,6 @@ func (m *Manager) startHelm(ctx context.Context, id string, q Request) (*batch.J
 	if cron.Spec.Suspend == nil || !*cron.Spec.Suspend {
 		return nil, fmt.Errorf("the TFT CronJob must be suspended before running tests from OVN-Light")
 	}
-	jobs, err := m.client.BatchV1().Jobs(ns).List(ctx, meta.ListOptions{})
-	if err != nil {
-		return nil, err
-	}
-	for _, j := range jobs.Items {
-		finished := false
-		for _, c := range j.Status.Conditions {
-			if c.Status == core.ConditionTrue && (c.Type == batch.JobComplete || c.Type == batch.JobFailed) {
-				finished = true
-			}
-		}
-		if !finished || j.Name == jobName {
-			return nil, fmt.Errorf("TFT Job %s is running or being cleaned up", j.Name)
-		}
-	}
 	base, err := m.client.CoreV1().ConfigMaps(ns).Get(ctx, chartConfig, meta.GetOptions{})
 	if err != nil {
 		return nil, err
@@ -95,7 +80,7 @@ func (m *Manager) startHelm(ctx context.Context, id string, q Request) (*batch.J
 	}
 	data["TFT_PLUGINS"] = "validate_offload"
 	j := &batch.Job{
-		ObjectMeta: meta.ObjectMeta{Name: jobName, Namespace: ns, Labels: map[string]string{runLabel: id, "app.kubernetes.io/managed-by": "ovn-light"}},
+		ObjectMeta: meta.ObjectMeta{Name: helmJobName(id), Namespace: ns, Labels: map[string]string{runLabel: id, "app.kubernetes.io/managed-by": "ovn-light"}},
 		Spec:       *cron.Spec.JobTemplate.Spec.DeepCopy(),
 	}
 	port := base.Data["TFT_IPERF_POD_PORT"]
@@ -115,6 +100,9 @@ func (m *Manager) startHelm(ctx context.Context, id string, q Request) (*batch.J
 	if j.Spec.ActiveDeadlineSeconds == nil {
 		j.Spec.ActiveDeadlineSeconds = ptr.To(int64(900))
 	}
+	j.Spec.BackoffLimit = ptr.To(int32(0))
+	j.Spec.PodReplacementPolicy = ptr.To(batch.Failed)
+	j.Spec.Template.Spec.RestartPolicy = core.RestartPolicyNever
 	var runner *core.Container
 	for i := range j.Spec.Template.Spec.Containers {
 		if j.Spec.Template.Spec.Containers[i].Name == "ovn-sdn-ft" {
@@ -132,11 +120,15 @@ func (m *Manager) startHelm(ctx context.Context, id string, q Request) (*batch.J
 			return nil, fmt.Errorf("TFT CronJob directly overrides %s; configure it through the chart ConfigMap", env.Name)
 		}
 	}
-	cm, err := m.client.CoreV1().ConfigMaps(ns).Create(ctx, &core.ConfigMap{
-		ObjectMeta: meta.ObjectMeta{Name: userConfig, Namespace: ns, Labels: map[string]string{runLabel: id}}, Data: data,
-	}, meta.CreateOptions{})
-	if apierrors.IsAlreadyExists(err) {
-		return nil, fmt.Errorf("%s already exists; finish the pending TFT run before starting another", userConfig)
+	cms := m.client.CoreV1().ConfigMaps(ns)
+	cm, err := cms.Get(ctx, userConfig, meta.GetOptions{})
+	if apierrors.IsNotFound(err) {
+		cm, err = cms.Create(ctx, &core.ConfigMap{
+			ObjectMeta: meta.ObjectMeta{Name: userConfig, Namespace: ns, Labels: map[string]string{runLabel: id}}, Data: data,
+		}, meta.CreateOptions{})
+	}
+	if err == nil && cm.Labels[runLabel] != id {
+		return nil, fmt.Errorf("%s is in use by another run", userConfig)
 	}
 	if err != nil {
 		return nil, err
@@ -147,7 +139,7 @@ func (m *Manager) startHelm(ctx context.Context, id string, q Request) (*batch.J
 	default:
 	}
 	// A timed-out create may have succeeded; its Job still needs the ConfigMap.
-	if apierrors.IsAlreadyExists(err) || apierrors.IsForbidden(err) || apierrors.IsInvalid(err) {
+	if apierrors.IsForbidden(err) || apierrors.IsInvalid(err) {
 		cleanup := m.client.CoreV1().ConfigMaps(ns).Delete(ctx, cm.Name, meta.DeleteOptions{Preconditions: &meta.Preconditions{UID: &cm.UID}})
 		if cleanup != nil && !apierrors.IsNotFound(cleanup) {
 			return nil, fmt.Errorf("create TFT Job: %w; clean up user ConfigMap: %v", err, cleanup)
@@ -205,6 +197,14 @@ func (m *Manager) helmResult(ctx context.Context, pod *core.Pod, job *batch.Job)
 	}
 	raw, err := m.client.CoreV1().Pods(m.helmNamespace).GetLogs(pod.Name, &core.PodLogOptions{Container: "ovn-sdn-ft", TailLines: ptr.To(int64(500)), LimitBytes: ptr.To(int64(1 << 20))}).DoRaw(ctx)
 	if err != nil {
+		if apierrors.IsBadRequest(err) {
+			for _, status := range pod.Status.ContainerStatuses {
+				if status.Name == "ovn-sdn-ft" && status.State.Waiting != nil {
+					result.Error = strings.TrimSpace(status.State.Waiting.Reason + " " + status.State.Waiting.Message)
+					return result, nil
+				}
+			}
+		}
 		return result, fmt.Errorf("read TFT result log: %w", err)
 	}
 	result.Log = string(raw[max(0, len(raw)-(32<<10)):])

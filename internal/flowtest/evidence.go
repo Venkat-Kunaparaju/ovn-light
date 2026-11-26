@@ -84,6 +84,7 @@ type Run struct {
 	Case          string         `json:"case,omitempty"`
 	ServiceIP     string         `json:"serviceIP,omitempty"`
 	ID            string         `json:"id"`
+	JobName       string         `json:"jobName,omitempty"`
 	JobUID        string         `json:"jobUID"`
 	Phase         string         `json:"phase"`
 	Network       string         `json:"network"`

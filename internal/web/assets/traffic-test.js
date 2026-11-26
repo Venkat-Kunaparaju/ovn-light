@@ -3,7 +3,7 @@
 const testDialog = $('traffic-test-dialog');
 let testTimer, testSequence = 0, testEnabled = false, testRunning = false, testContext = '';
 
-let catalog, testSubmitting = false;
+let catalog, testSubmitting = false, testRunID = '';
 const testCase = () => catalog?.cases.find(c=>c.id===$('traffic-test-case').value);
 
 function fillTestChoices(id, choices, previous) {
@@ -32,7 +32,6 @@ function updateTestDestination(dst) {
 function updateTestForm() {
   const src = $('traffic-test-source').value, dst = $('traffic-test-destination').value;
   const reason = testContext || (!testEnabled ? 'Traffic tests require a live, write-enabled server with the test runner installed.' :
-    testRunning ? 'One test is running. Follow it in Traffic test history on Hardware Offload.' :
     !src || !dst ? 'No eligible node pair for this test case. Check node readiness and device capacity.' : '');
   $('traffic-test-message').textContent = reason;
   $('traffic-test-submit').disabled = Boolean(reason) || testSubmitting || !testCase();
@@ -45,7 +44,7 @@ function testResult(run, root=$('traffic-test-result')) {
   root.dataset.run=run.id;
   const profile=catalog?.profiles.find(p=>p.id===(run.test||'iperf-tcp'));
   const scenario=catalog?.cases.find(c=>c.id===(run.case||'POD_TO_POD_DIFF_NODE'));
-  root.append(text('h3',run.finished ? 'Completed run' : 'Current test'), text('strong',[run.testName||profile?.name||run.test,run.caseName||scenario?.name||run.case].filter(Boolean).join(' · ')),
+  root.append(text('h3',runOutcome(run)[0]+' run'), text('strong',[run.testName||profile?.name||run.test,run.caseName||scenario?.name||run.case].filter(Boolean).join(' · ')),
     text('p',run.source.node+' → '+run.destination.node+' · '+new Date(run.started).toLocaleString()));
   const traffic = run.traffic;
   if (traffic?.delivered) {
@@ -57,7 +56,7 @@ function testResult(run, root=$('traffic-test-result')) {
     root.append(badge(run.test==='iperf-tcp'?'TCP delivery verified':'Traffic delivered','green'),text('p',stats.join(' · ')));
     if((scenario?.service || run.case?.includes('CLUSTER_IP')) && traffic.targetIP)root.append(text('p','Service IP '+traffic.targetIP+' → server '+traffic.destinationIP));
   } else if (traffic) root.append(text('strong','Test failed'),text('p',traffic.error || 'No completed transfer.'));
-  else root.append(text('p','Test in progress. Waiting for the runner and collector samples.'));
+  else root.append(text('p',run.phase==='queued'?'Queued. Your test will start automatically.':run.phase==='starting'?'Starting the TFT runner.':'Test in progress. Waiting for the runner and collector samples.'));
   if(traffic?.offload?.length){
     root.append(text('h3','TFT hardware offload validation'));
     for(const result of traffic.offload){
@@ -103,7 +102,7 @@ function testResult(run, root=$('traffic-test-result')) {
 
 async function refreshTest(seq) {
   try {
-    const status=await api('traffic-test');
+    const status=testRunID ? {enabled:true,run:await api('traffic-test/runs/'+encodeURIComponent(testRunID))} : await api('traffic-test');
     if (seq!==testSequence || !testDialog.open) return;
     testEnabled=status.enabled;
     testRunning=Boolean(status.run && !status.run.finished);
@@ -114,7 +113,7 @@ async function refreshTest(seq) {
   }
 }
 async function openTrafficTest(src,dst,network) {
-  clearTimeout(testTimer);testEnabled=false;testRunning=false;testSubmitting=false;catalog=null;
+  clearTimeout(testTimer);testEnabled=false;testRunning=false;testSubmitting=false;catalog=null;testRunID='';
   for(const id of ['case','source','destination']) $('traffic-test-'+id).replaceChildren();
   $('traffic-test-description').textContent='';
   testContext=network && network!=='default' ? 'This test supports the default network. The selected link uses '+network+'.' : '';
@@ -147,7 +146,7 @@ $('traffic-test-form').onsubmit=async e=>{
     const status=await api('traffic-test',request);
     loadTestHistory();
     if(seq!==testSequence)return;
-    testSubmitting=false;testRunning=true;updateTestForm();testResult(status.run);refreshTest(seq);
+    testRunID=status.run.id;testSubmitting=false;testRunning=true;updateTestForm();testResult(status.run);refreshTest(seq);
   } catch(err) {
     if(seq===testSequence){testSubmitting=false;updateTestForm();$('traffic-test-message').textContent=err.message}
   }
@@ -180,7 +179,7 @@ function renderTestFlows(card,node,finished){
 
 let testHistoryRequest=0, testHistoryTimer, selectedTestRun='';
 function runOutcome(run){
-  if(!run.finished)return ['Running','amber'];
+  if(!run.finished)return [{queued:'Queued',starting:'Starting'}[run.phase]||'Running','amber'];
   if(run.phase==='failed')return ['Failed','red'];
   return ['Completed','green'];
 }
@@ -199,7 +198,7 @@ async function loadTestHistory(){
     if(compact && runs.length>3)header.append(button('View all runs',()=>page('offload')));
     root.append(header);
     if(!runs.length)root.append(text('p','No traffic tests recorded.','note'));
-    for(const run of runs.slice(0,compact?3:30)){
+    for(const run of (compact?runs.slice(0,3):runs)){
       const row=text('article','','record record-top'), label=text('div',''), [name,color]=runOutcome(run);
       const title='TCP throughput';
       label.append(text('strong',title+' · '+(run.testName||run.test)),text('p',new Date(run.started).toLocaleString()+' · '+run.source.node+' → '+run.destination.node,'note'));
